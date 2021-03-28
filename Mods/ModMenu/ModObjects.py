@@ -123,6 +123,18 @@ class _ModMeta(ABCMeta):
 
         functions = (attribute for attribute in cls.__dict__.values() if callable(attribute))
         for function in functions:
+            option = getattr(function, "_option", None)
+            if option is not None:
+                cls.Options.append(option)
+                if not isinstance(function, (staticmethod, classmethod)):
+                    function._is_method = True
+
+            keybind = getattr(function, "_keybind", None)
+            if keybind is not None:
+                cls.Keybinds.append(keybind)
+                if not isinstance(function, (staticmethod, classmethod)):
+                    function._is_method = True
+
             method_sender = NetworkManager._find_method_sender(function)
             if method_sender is not None:
                 if method_sender._is_server:  # type: ignore
@@ -266,7 +278,7 @@ class SDKMod(metaclass=_ModMeta):
                 """
                 for option in self.Options:
                     if isinstance(option, OptionManager.Options.Value):
-                        self.ModOptionChanged(option, option.CurrentValue)
+                        option.ChangingForMod(self, option.CurrentValue)
             self.Status = "Enabled"
             self.SettingsInputs["Enter"] = "Disable"
 

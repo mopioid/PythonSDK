@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import unrealsdk
 import functools
 import inspect
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Callable, ClassVar, Dict, Optional, Tuple, Union
+from typing import Callable, ClassVar, Dict, Optional, Tuple, Type, Union
 
 from . import DeprecationHelper as dh
 from . import MenuManager, ModObjects, SettingsManager
@@ -12,6 +14,7 @@ __all__: Tuple[str, ...] = (
     "InputEvent",
     "Keybind",
     "KeybindCallback",
+    "KeybindCallbackMethod",
 )
 
 
@@ -29,6 +32,10 @@ class InputEvent(IntEnum):
 
 
 KeybindCallback = Union[Callable[[], None], Callable[[InputEvent], None]]
+KeybindCallbackMethod = Union[
+    Callable[[ModObjects.SDKMod], None],
+    Callable[[ModObjects.SDKMod, InputEvent], None]
+]
 
 
 @dataclass
@@ -59,7 +66,7 @@ class Keybind:
     IsRebindable: bool = True
     IsHidden: bool = False
 
-    OnPress: Optional[KeybindCallback] = None
+    OnPress: Optional[Union[KeybindCallback, KeybindCallbackMethod]] = None
 
     DefaultKey: str = field(default=Key, init=False)
 
@@ -92,13 +99,36 @@ class Keybind:
         else:
             raise IndexError("list index out of range")
 
+    def __call__(
+        self,
+        function: Union[KeybindCallback, KeybindCallbackMethod]
+    ) -> Union[KeybindCallback, KeybindCallbackMethod]:
+        """
+        Decorate the provided function with this Keybind, assigning it as the Keybind's `OnPress`
+        function.
+
+        Args:
+            function:
+                The function to be decorated. If the function is a member of a mod class, the
+                Keybind will be added to the mod class's `Keybinds` list. If it is an instance
+                method, the instance will be passed to the `self` parameter on invokation.
+        Returns:
+            The original function.
+        """
+        # Unfortunately we must create a circular reference here; We need to keep a strong reference
+        # to OnPress functions to retain user assigned ones, and the function also must keep a
+        # strong reference to this object to retain it for metaclass initialization.
+        self.OnPress = function
+        function._keybind = self
+        return function
+
 
 """
 We put all keybinds into their own "MODDED KEYBINDS" menu.
 It's important to realize however that, internally, it's still the exact same menu as the one for
  the normal keybinds.
 We have one keybinds menu object with one keybind list, we just, based on which menu item you
- select, filter dowc the keybinds that you can actually see.
+ select, filter down the keybinds that you can actually see.
 """
 
 
@@ -209,18 +239,27 @@ def _extOnPopulateKeys(caller: unrealsdk.UObject, function: unrealsdk.UFunction,
     caller.extOnPopulateKeys()
 
     _modded_keybind_map = {}
+    classes_keybinds: Dict[Type[ModObjects.SDKMod], List[Keybind]] = {}
+
+    # Iterate each enabled mod that has user-facing keybinds.
     for mod in MenuManager.GetOrderedModList():
-        if not mod.IsEnabled:
+        if not mod.IsEnabled or all(isinstance(k, Keybind) and k.IsHidden for k in mod.Keybinds):
             continue
 
-        if all(isinstance(k, Keybind) and k.IsHidden for k in mod.Keybinds):
-            continue
+        # Retrieve the working list of options for this mod's class, creating it if necessary.
+        class_keybinds = classes_keybinds.setdefault(type(mod), [])
+        for keybind in mod.Keybinds:
+            # Append each of this mod instance's visible keybinds (that we have not already).
+            if not keybind.IsHidden and keybind not in class_keybinds:
+                class_keybinds.append(keybind)
 
-        tag = f"{_TAG_SEPERATOR}.{mod.Name}"
-        idx = caller.AddKeyBindEntry(tag, tag, mod.Name)
+    # Iterate over each mod class and keybind list.
+    for mod_class, class_keybinds in classes_keybinds.items():
+        tag = f"{_TAG_SEPERATOR}.{mod_class.Name}"
+        idx = caller.AddKeyBindEntry(tag, tag, mod_class.Name)
         caller.KeyBinds[idx].CurrentKey = "None"
 
-        for input in mod.Keybinds:
+        for input in class_keybinds:
             name: str
             key: str
             rebindable: bool
@@ -236,7 +275,7 @@ def _extOnPopulateKeys(caller: unrealsdk.UObject, function: unrealsdk.UFunction,
                 key = input[1]
                 rebindable = True
 
-            tag = (_TAG_INPUT if rebindable else _TAG_UNREBINDABLE) + f".{mod.Name}.{name}"
+            tag = (_TAG_INPUT if rebindable else _TAG_UNREBINDABLE) + f".{mod_class.Name}.{name}"
             idx = caller.AddKeyBindEntry(tag, tag, " " * _INDENT + name)
 
             _modded_keybind_map[idx] = input
@@ -457,18 +496,22 @@ def _InputKey(caller: unrealsdk.UObject, function: unrealsdk.UFunction, params: 
             if returned_input.Key != params.Key:
                 continue
 
-            # Prefer the callback
-            function = (
-                returned_input.OnPress or functools.partial(mod.GameInputPressed, returned_input)
-            )
+            # If the keybind has no OnPress callback, we use the instance's default method.
+            if returned_input.OnPress is None:
+                function = functools.partial(mod.GameInputPressed, returned_input)
+            # If the keybind's callback is a class or instance method, bind it appropriately.
+            elif isinstance(returned_input.OnPress, classmethod):
+                function = returned_input.OnPress.__get__(type(mod), type(mod))
+            elif getattr(returned_input.OnPress, "_is_method", False):
+                function = returned_input.OnPress.__get__(mod, type(mod))
+            else:
+                function = returned_input.OnPress
 
             if len(inspect.signature(function).parameters) == 0:
                 if params.Event == InputEvent.Pressed:
                     function()
-                    return False
             else:
                 function(InputEvent(params.Event))
-                return False
     return True
 
 

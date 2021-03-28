@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unrealsdk
-from typing import Any, List, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple, Type
 
 from . import MenuManager, ModObjects, Options, SettingsManager
 
@@ -148,17 +148,26 @@ def _DataProviderOptionsBasePopulate(caller: unrealsdk.UObject, function: unreal
     # If we're on the first level we need to setup the inital list
     if len(_nested_options_stack) == 0:
         all_options: List[Options.Base] = []
-        for mod in MenuManager.GetOrderedModList():
-            if not mod.IsEnabled:
-                continue
+        classes_options: Dict[Type[ModObjects.SDKMod], List[Options.Base]] = {}
 
-            one_shown = False
+        # Iterate each enabled mod that lists options.
+        for mod in MenuManager.GetOrderedModList():
+            if not mod.IsEnabled or len(mod.Options) == 0:
+                continue
+            # Retrieve the working list of options for this mod's class, creating it if necessary.
+            class_options = classes_options.setdefault(type(mod), [])
             for option in mod.Options:
-                if option.IsHidden:
-                    continue
-                if not one_shown:
-                    one_shown = True
-                    all_options.append(_ModHeader(mod.Name))
+                # Append each of this mod instance's visible options (that we have not already).
+                if not option.IsHidden and option not in class_options:
+                    class_options.append(option)
+
+        # Iterate over each mod class which has at least one visible option.
+        for mod_class, class_options in classes_options.items():
+            if len(class_options) == 0:
+                continue
+            # Append a header with the mod class's name, followed by each of its options.
+            all_options.append(_ModHeader(mod_class.Name))
+            for option in class_options:
                 all_options.append(option)
 
         _nested_options_stack.append(Options.Nested(_MOD_OPTIONS_MENU_NAME, "", all_options))
@@ -246,11 +255,9 @@ def _HandleSpinnerSliderChange(caller: unrealsdk.UObject, function: unrealsdk.UF
 
     for mod in ModObjects.Mods:
         if in_option_list(mod.Options):
-            # Calling this before updating the value
-            mod.ModOptionChanged(changed_option, new_value)
-            changed_option.CurrentValue = new_value
-            break
+            changed_option.ChangingForMod(mod, new_value)
 
+    changed_option.CurrentValue = new_value
     return True
 
 

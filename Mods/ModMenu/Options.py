@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from reprlib import recursive_repr
-from typing import Any, Generic, Optional, Sequence, Tuple, TypeVar
+from inspect import signature
+from typing import Any, Callable, Generic, Optional, Sequence, Tuple, TypeVar, Union
 
+from . import ModObjects
 from . import DeprecationHelper as dh
 
 __all__: Tuple[str, ...] = (
@@ -13,9 +17,14 @@ __all__: Tuple[str, ...] = (
     "Slider",
     "Spinner",
     "Value",
+    "OptionCallback",
+    "OptionCallbackMethod",
 )
 
 T = TypeVar("T")
+
+OptionCallback = Union[Callable[[T], None], Callable[[T, T], None]]
+OptionCallbackMethod = Union[Callable[[Any, T], None], Callable[[Any, T, T], None]]
 
 
 class Base(ABC):
@@ -54,9 +63,16 @@ class Value(Base, Generic[T]):
         StartingValue: The default value of the option.
 
         IsHidden: If the option is hidden from the options menu.
+
+        OnChange:
+            A callback for when the option's value is changed. If provided, it will be called
+             instead of the mod's `ModOptionChanged`. The new value will be passed as the first
+             argument. If it accepts a second argument, it will get passed the option's old value.
     """
     CurrentValue: T
     StartingValue: T
+
+    OnChange: Optional[Union[OptionCallback, OptionCallbackMethod]] = None
 
     @abstractmethod
     def __init__(
@@ -68,6 +84,47 @@ class Value(Base, Generic[T]):
         IsHidden: bool = True
     ) -> None:
         raise NotImplementedError
+
+    def ChangingForMod(self, mod: ModObjects.SDKMod, new_value: T) -> None:
+        # If we do not have an OnChange method, invoke the default one on the mod instance.
+        if self.OnChange is None:
+            mod.ModOptionChanged(self, new_value)
+            return
+        # If our callback is a class or instance method, bind it appropriately.
+        if isinstance(self.OnChange, classmethod):
+            onchange = self.OnChange.__get__(type(mod), type(mod))
+        elif getattr(self.OnChange, "_is_method", False):
+            onchange = self.OnChange.__get__(mod, type(mod))
+        else:
+            onchange = self.OnChange
+        # If the callback only has one parameter, do not pass the old value.
+        if len(signature(onchange).parameters) == 1:
+            onchange(new_value)
+        else:
+            onchange(new_value, self.CurrentValue)
+
+    def __call__(
+        self,
+        function: Union[OptionCallback, OptionCallbackMethod]
+    ) -> Union[OptionCallback, OptionCallbackMethod]:
+        """
+        Decorate the provided function with this Option, assigning it as the Option's `OnChange`
+        function.
+
+        Args:
+            function:
+                The function to be decorated. If the function is a member of a mod class, the
+                Option will be added to the mod class's `Options` list. If it is an instance
+                method, the instance will be passed to the `self` parameter on invokation.
+        Returns:
+            The original function.
+        """
+        # Unfortunately we must create a circular reference here; We need to keep a strong reference
+        # to OnChange functions to retain user assigned ones, and the function also must keep a
+        # strong reference to this object to retain it for metaclass initialization.
+        self.OnChange = function
+        function._option = self
+        return function
 
 
 class Hidden(Value[T]):

@@ -5,7 +5,7 @@ import inspect
 import json
 import traceback
 from os import path
-from typing import Any, Dict, Sequence, Set, Tuple
+from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from . import DeprecationHelper as dh
 from . import KeybindManager, ModObjects, Options
@@ -24,6 +24,8 @@ _ENABLED_CATEGORY_NAME = "AutoEnable"
 _SETTINGS_FILE_NAME = "settings.json"
 
 _mods_to_enable_on_main_menu: Set[ModObjects.SDKMod] = set()
+
+_is_performing_load: bool = False
 
 
 def GetSettingsFilePath(mod: ModObjects.SDKMod) -> str:
@@ -45,7 +47,24 @@ def SaveModSettings(mod: ModObjects.SDKMod) -> None:
     Args:
         mod: The instance of the mod whose settings should be saved.
     """
+    if _is_performing_load:
+        return
+
     mod_settings: Dict[str, Any] = {}
+
+    class_options: List[Options.Base] = []
+    class_keybinds: List[KeybindManager.Keybind] = []
+    for other_mod in ModObjects.Mods:
+        if not isinstance(other_mod, type(mod)):
+            continue
+
+        for option in other_mod.Options:
+            if option not in class_options:
+                class_options.append(option)
+
+        for keybind in other_mod.Keybinds:
+            if keybind not in class_keybinds:
+                class_keybinds.append(keybind)
 
     def create_options_dict(options: Sequence[Options.Base]) -> Dict[str, Any]:
         settings = {}
@@ -56,13 +75,13 @@ def SaveModSettings(mod: ModObjects.SDKMod) -> None:
                 settings[option.Caption] = create_options_dict(option.Children)
         return settings
 
-    options_dict = create_options_dict(mod.Options)
+    options_dict = create_options_dict(class_options)
 
     if len(options_dict) > 0:
         mod_settings[_OPTIONS_CATEGORY_NAME] = options_dict
 
     keybinds_dict = {}
-    for input in mod.Keybinds:
+    for input in class_keybinds:
         if isinstance(input, KeybindManager.Keybind):
             if not input.IsRebindable:
                 continue
@@ -102,6 +121,9 @@ def LoadModSettings(mod: ModObjects.SDKMod) -> None:
     Args:
         mod: The instance of the mod to load settings onto.
     """
+    global _is_performing_load
+    _is_performing_load = True
+
     settings: Dict[str, Any]
     try:
         with open(GetSettingsFilePath(mod)) as file:
@@ -157,6 +179,8 @@ def LoadModSettings(mod: ModObjects.SDKMod) -> None:
                 mod.SettingsInputPressed("Enable")
         elif mod.SaveEnabledState == ModObjects.EnabledSaveType.LoadOnMainMenu:
             _mods_to_enable_on_main_menu.add(mod)
+
+    _is_performing_load = False
 
 
 def _FrontendGFxMovieStart(caller: unrealsdk.UObject, function: unrealsdk.UFunction, params: unrealsdk.FStruct) -> bool:
